@@ -11,7 +11,7 @@
 
 
 
-
+//图片操作库，仅头文件
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -58,7 +58,7 @@ std::string SaveFileDialog() {
     return "";
 }
 
-// ========== 工具函数 浮点转整数（RGB位图格式） ==========
+// ========== 工具核函数 浮点转整数（RGB位图格式） ==========
 __global__ void float_to_uchar_kernel(
     const float* input, unsigned char* output,
     int width, int height) {
@@ -74,6 +74,7 @@ __global__ void float_to_uchar_kernel(
         output[idx] = static_cast<unsigned char>(val);
     }
 }
+
 
 // ========== 工具函数 计算输出大小 ==========
 int calculateOutputSize(int input_size, int kernel_size, int stride) {
@@ -98,7 +99,7 @@ __global__ void convolution_rgb_kernel(
     int stride, //步长
     int channel//当前处理的通道（0-R, 1-G, 2-B）
 ) {
-    //通过块索引*块大小+线程索引确定单个线程在输出图的坐标x,y
+    //通过块索引*块大小+线程索引确定单个线程在整个块图的坐标x,y
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -127,7 +128,7 @@ __global__ void convolution_rgb_kernel(
         output[(y * out_width + x) * 3 + channel] = sum;
     }
 }
-
+    
 // ========== CUDA 核函数 RGB最大池化 ==========
 __global__ void max_pooling_rgb_kernel(
     const float* input, float* output,
@@ -238,13 +239,14 @@ bool applyConvolution(const std::string& input_path, const std::string& output_p
     cudaMemset(d_output, 0, output_size);
 
     // 配置Kernel参数
-    dim3 blockSize(16, 16);
-    dim3 gridSize((out_width + blockSize.x - 1) / blockSize.x,
-        (out_height + blockSize.y - 1) / blockSize.y);
+    const int BLOCK_SIZE = 16;
+    dim3 threadsPerBlock(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 blocksPerGrid((out_width + BLOCK_SIZE - 1) / BLOCK_SIZE,
+        (out_height + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
     // 对RGB三个通道分别处理
     for (int c = 0; c < 3; ++c) {
-        convolution_rgb_kernel << <gridSize, blockSize >> > (
+        convolution_rgb_kernel << <blocksPerGrid, threadsPerBlock >> > (
             d_input, d_output,
             width, height,
             d_kernel, kernel_size,
@@ -354,9 +356,39 @@ bool applyMaxPooling(const std::string& input_path, const std::string& output_pa
     return true;
 }
 
-// ========== 主函数 (修改部分) ==========
+void convolution_rgb_cpu(const unsigned char* input, float* output,
+    int width, int height,
+    const float* kernel, int kernel_size,
+    int stride) {
+
+    int out_width = calculateOutputSize(width, kernel_size, stride);
+    int out_height = calculateOutputSize(height, kernel_size, stride);
+
+    for (int y = 0; y < out_height; ++y) {
+        for (int x = 0; x < out_width; ++x) {
+            for (int c = 0; c < 3; ++c) {
+                float sum = 0.0f;
+                for (int ky = 0; ky < kernel_size; ++ky) {
+                    for (int kx = 0; kx < kernel_size; ++kx) {
+                        int in_x = x * stride + kx;
+                        int in_y = y * stride + ky;
+                        if (in_x < 0) in_x = 0;
+                        if (in_x >= width) in_x = width - 1;
+                        if (in_y < 0) in_y = 0;
+                        if (in_y >= height) in_y = height - 1;
+                        int idx = (in_y * width + in_x) * 3 + c;
+                        sum += static_cast<float>(input[idx]) * kernel[ky * kernel_size + kx];
+                    }
+                }
+                output[(y * out_width + x) * 3 + c] = sum;
+            }
+        }
+    }
+}
+
+// ========== 主函数 ==========
 int main(int argc, char* argv[]) {
-    printf("=== CUDA图片处理 (图形界面版) ===\n\n");
+    printf("=== CUDA图片处理 ===\n\n");
 
     // 1. 弹窗选择输入图片
     printf("正在打开文件选择器...\n");
@@ -370,7 +402,7 @@ int main(int argc, char* argv[]) {
 
     printf("已选择输入图片: %s\n", input_path.c_str());
 
-    // 2. 定义输出文件名 (基于输入文件名生成，或者也可以用 SaveFileDialog 让用户逐个选，这里为了效率自动生成)
+    // 2. 定义输出文件名
     // 获取输入文件路径的目录部分
     size_t lastSlash = input_path.find_last_of("/\\");
     std::string output_dir = (lastSlash == std::string::npos) ? "" : input_path.substr(0, lastSlash + 1);
@@ -410,7 +442,7 @@ int main(int argc, char* argv[]) {
     printf("5. 最大值池化...\n");
     applyMaxPooling(input_path, pool_name, 2, 2);
 
-    printf("\n🎉 所有处理完成!\n");
+    printf("\n 所有处理完成!\n");
     printf("输出文件已保存在与原图相同的目录下。\n");
 
     system("pause");
